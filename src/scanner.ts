@@ -7,8 +7,75 @@ import {
   ScanResult,
   ScanSummary,
   SarifResult,
+  SecurityFinding,
 } from './types';
 import masterPackagesData from '../master-packages.json';
+
+// =============================================================================
+// SUSPICIOUS PATTERNS FOR ADVANCED DETECTION
+// =============================================================================
+
+// Suspicious commands in package.json scripts
+const SUSPICIOUS_SCRIPT_PATTERNS = [
+  { pattern: /setup_bun\.js/i, description: 'Shai-Hulud malicious setup script' },
+  { pattern: /bun_environment\.js/i, description: 'Shai-Hulud environment script' },
+  { pattern: /\bcurl\s+[^|]*\|\s*(ba)?sh/i, description: 'Curl piped to shell execution' },
+  { pattern: /\bwget\s+[^|]*\|\s*(ba)?sh/i, description: 'Wget piped to shell execution' },
+  { pattern: /\beval\s*\(/i, description: 'Eval execution (potential code injection)' },
+  { pattern: /\beval\s+['"`\$]/i, description: 'Eval with dynamic content' },
+  { pattern: /base64\s+(--)?d(ecode)?/i, description: 'Base64 decode execution' },
+  { pattern: /\$\(curl/i, description: 'Command substitution with curl' },
+  { pattern: /\$\(wget/i, description: 'Command substitution with wget' },
+  { pattern: /node\s+-e\s+['"].*?(http|eval|Buffer\.from)/i, description: 'Inline Node.js code execution' },
+  { pattern: /npx\s+--yes\s+[^@\s]+@/i, description: 'NPX auto-install of versioned package' },
+];
+
+// TruffleHog and credential scanning patterns
+const TRUFFLEHOG_PATTERNS = [
+  { pattern: /trufflehog/i, description: 'TruffleHog reference detected' },
+  { pattern: /trufflesecurity/i, description: 'TruffleSecurity reference' },
+  { pattern: /credential[_-]?scan/i, description: 'Credential scanning pattern' },
+  { pattern: /secret[_-]?scan/i, description: 'Secret scanning pattern' },
+  { pattern: /--json\s+--no-update/i, description: 'TruffleHog CLI pattern' },
+  { pattern: /github\.com\/trufflesecurity\/trufflehog/i, description: 'TruffleHog GitHub download' },
+  { pattern: /releases\/download.*trufflehog/i, description: 'TruffleHog binary download' },
+];
+
+// Shai-Hulud repository indicators
+const SHAI_HULUD_REPO_PATTERNS = [
+  { pattern: /shai[-_]?hulud/i, description: 'Shai-Hulud repository name' },
+  { pattern: /the\s+second\s+coming/i, description: 'Shai-Hulud campaign description' },
+  { pattern: /sha1hulud/i, description: 'SHA1HULUD variant' },
+];
+
+// Malicious runner patterns in GitHub Actions
+const MALICIOUS_RUNNER_PATTERNS = [
+  { pattern: /runs-on:\s*['"]?SHA1HULUD/i, description: 'SHA1HULUD malicious runner' },
+  { pattern: /runs-on:\s*['"]?self-hosted.*SHA1HULUD/i, description: 'Self-hosted SHA1HULUD runner' },
+  { pattern: /runner[_-]?name.*SHA1HULUD/i, description: 'SHA1HULUD runner reference' },
+  { pattern: /labels:.*SHA1HULUD/i, description: 'SHA1HULUD runner label' },
+];
+
+// Medium Risk: Suspicious content patterns (webhook exfiltration)
+const WEBHOOK_EXFIL_PATTERNS = [
+  { pattern: /webhook\.site/i, description: 'Webhook.site exfiltration endpoint' },
+  { pattern: /bb8ca5f6-4175-45d2-b042-fc9ebb8170b7/i, description: 'Known malicious webhook UUID' },
+  { pattern: /exfiltrat/i, description: 'Exfiltration reference' },
+];
+
+// Known affected namespaces (for low-risk warnings)
+const AFFECTED_NAMESPACES = [
+  '@ctrl',
+  '@crowdstrike',
+  '@art-ws',
+  '@ngx',
+  '@nativescript-community',
+  '@asyncapi',
+  '@postman',
+  '@ens',
+  '@voiceflow',
+  '@browserbase',
+];
 
 const masterPackages: MasterPackages = masterPackagesData as MasterPackages;
 
@@ -256,14 +323,424 @@ export function findPackageJsonFiles(directory: string): string[] {
   return packageFiles;
 }
 
+// =============================================================================
+// ADVANCED SECURITY CHECKS
+// =============================================================================
+
+/**
+ * Check package.json scripts for suspicious patterns
+ */
+export function checkSuspiciousScripts(filePath: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  const pkg = parsePackageJson(filePath);
+
+  if (!pkg || !pkg.scripts) return findings;
+
+  for (const [scriptName, scriptContent] of Object.entries(pkg.scripts)) {
+    if (!scriptContent) continue;
+
+    // Check for Shai-Hulud specific patterns (Critical)
+    if (
+      /setup_bun\.js/i.test(scriptContent) ||
+      /bun_environment\.js/i.test(scriptContent)
+    ) {
+      findings.push({
+        type: 'suspicious-script',
+        severity: 'critical',
+        title: `Shai-Hulud malicious script in "${scriptName}"`,
+        description: `The "${scriptName}" script contains a reference to known Shai-Hulud malicious files. This is a strong indicator of compromise.`,
+        location: filePath,
+        evidence: `"${scriptName}": "${scriptContent}"`,
+      });
+      continue;
+    }
+
+    // Check all suspicious patterns
+    for (const { pattern, description } of SUSPICIOUS_SCRIPT_PATTERNS) {
+      if (pattern.test(scriptContent)) {
+        // preinstall/postinstall with suspicious commands are higher severity
+        const isCritical =
+          ['preinstall', 'postinstall', 'prepare', 'prepublish'].includes(
+            scriptName
+          ) &&
+          (pattern.test(scriptContent) || /curl|wget|eval/i.test(scriptContent));
+
+        findings.push({
+          type: 'suspicious-script',
+          severity: isCritical ? 'critical' : 'high',
+          title: `Suspicious "${scriptName}" script`,
+          description: `${description}. This pattern is commonly used in supply chain attacks.`,
+          location: filePath,
+          evidence: `"${scriptName}": "${scriptContent.substring(0, 200)}${scriptContent.length > 200 ? '...' : ''}"`,
+        });
+        break; // Only report first match per script
+      }
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Check for TruffleHog activity and credential scanning patterns
+ */
+export function checkTrufflehogActivity(directory: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  const suspiciousFiles: string[] = [];
+
+  const searchDir = (dir: string, depth: number = 0) => {
+    if (depth > 5) return;
+
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+
+        if (entry.isFile()) {
+          // Check for TruffleHog binary or related files
+          if (
+            /trufflehog/i.test(entry.name) ||
+            entry.name === 'bun_environment.js' ||
+            entry.name === 'setup_bun.js'
+          ) {
+            suspiciousFiles.push(fullPath);
+          }
+
+          // Scan content of shell scripts and JS files
+          if (/\.(sh|js|ts|mjs|cjs)$/i.test(entry.name)) {
+            try {
+              const content = fs.readFileSync(fullPath, 'utf8');
+
+              for (const { pattern, description } of TRUFFLEHOG_PATTERNS) {
+                if (pattern.test(content)) {
+                  findings.push({
+                    type: 'trufflehog-activity',
+                    severity: 'critical',
+                    title: `TruffleHog activity detected`,
+                    description: `${description}. This may indicate automated credential theft as part of the Shai-Hulud attack.`,
+                    location: fullPath,
+                    evidence: pattern.toString(),
+                  });
+                  break;
+                }
+              }
+
+              // Check for webhook exfiltration
+              for (const { pattern, description } of WEBHOOK_EXFIL_PATTERNS) {
+                if (pattern.test(content)) {
+                  findings.push({
+                    type: 'secrets-exfiltration',
+                    severity: 'critical',
+                    title: `Data exfiltration endpoint detected`,
+                    description: `${description}. This endpoint may be used to exfiltrate stolen credentials.`,
+                    location: fullPath,
+                    evidence: pattern.toString(),
+                  });
+                  break;
+                }
+              }
+            } catch {
+              // Skip files we can't read
+            }
+          }
+        } else if (
+          entry.isDirectory() &&
+          !entry.name.startsWith('.') &&
+          entry.name !== 'node_modules'
+        ) {
+          searchDir(fullPath, depth + 1);
+        }
+      }
+    } catch {
+      // Skip directories we can't read
+    }
+  };
+
+  searchDir(directory);
+
+  // Report suspicious files found
+  for (const file of suspiciousFiles) {
+    const fileName = path.basename(file);
+    findings.push({
+      type: 'trufflehog-activity',
+      severity: 'critical',
+      title: `Suspicious file: ${fileName}`,
+      description: `Found file "${fileName}" which is associated with the Shai-Hulud attack. This file may download and execute TruffleHog for credential theft.`,
+      location: file,
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Check for actionsSecrets.json exfiltration files
+ */
+export function checkSecretsExfiltration(directory: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+
+  const searchDir = (dir: string, depth: number = 0) => {
+    if (depth > 5) return;
+
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+
+        if (entry.isFile()) {
+          // Check for actionsSecrets.json
+          if (entry.name === 'actionsSecrets.json') {
+            findings.push({
+              type: 'secrets-exfiltration',
+              severity: 'critical',
+              title: `Secrets exfiltration file detected`,
+              description: `Found "actionsSecrets.json" which is used by the Shai-Hulud attack to store stolen credentials with double Base64 encoding before exfiltration.`,
+              location: fullPath,
+            });
+          }
+
+          // Check for other suspicious JSON files that might contain secrets
+          if (
+            /secrets?\.json$/i.test(entry.name) ||
+            /credentials?\.json$/i.test(entry.name) ||
+            /exfil.*\.json$/i.test(entry.name)
+          ) {
+            try {
+              const content = fs.readFileSync(fullPath, 'utf8');
+              // Check if it looks like base64 encoded data
+              if (/^[A-Za-z0-9+/=]{100,}$/m.test(content)) {
+                findings.push({
+                  type: 'secrets-exfiltration',
+                  severity: 'high',
+                  title: `Potential secrets file with encoded data`,
+                  description: `Found "${entry.name}" containing what appears to be Base64 encoded data. This may be exfiltrated credentials.`,
+                  location: fullPath,
+                });
+              }
+            } catch {
+              // Skip files we can't read
+            }
+          }
+        } else if (
+          entry.isDirectory() &&
+          !entry.name.startsWith('.') &&
+          entry.name !== 'node_modules'
+        ) {
+          searchDir(fullPath, depth + 1);
+        }
+      }
+    } catch {
+      // Skip directories we can't read
+    }
+  };
+
+  searchDir(directory);
+  return findings;
+}
+
+/**
+ * Check GitHub Actions workflows for malicious runners
+ */
+export function checkMaliciousRunners(directory: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  const workflowDirs = [
+    path.join(directory, '.github', 'workflows'),
+    path.join(directory, '.github'),
+  ];
+
+  for (const workflowDir of workflowDirs) {
+    if (!fs.existsSync(workflowDir)) continue;
+
+    try {
+      const entries = fs.readdirSync(workflowDir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!/\.(yml|yaml)$/i.test(entry.name)) continue;
+
+        const fullPath = path.join(workflowDir, entry.name);
+
+        try {
+          const content = fs.readFileSync(fullPath, 'utf8');
+
+          // Check for malicious runner patterns
+          for (const { pattern, description } of MALICIOUS_RUNNER_PATTERNS) {
+            if (pattern.test(content)) {
+              findings.push({
+                type: 'malicious-runner',
+                severity: 'critical',
+                title: `Malicious GitHub Actions runner detected`,
+                description: `${description}. The SHA1HULUD runner is used by the Shai-Hulud attack to execute credential theft in CI/CD environments.`,
+                location: fullPath,
+                evidence: pattern.toString(),
+              });
+            }
+          }
+
+          // Check for Shai-Hulud repo patterns in workflow
+          for (const { pattern, description } of SHAI_HULUD_REPO_PATTERNS) {
+            if (pattern.test(content)) {
+              findings.push({
+                type: 'shai-hulud-repo',
+                severity: 'critical',
+                title: `Shai-Hulud reference in workflow`,
+                description: `${description}. This workflow may be configured to exfiltrate data to attacker-controlled repositories.`,
+                location: fullPath,
+                evidence: pattern.toString(),
+              });
+            }
+          }
+        } catch {
+          // Skip files we can't read
+        }
+      }
+    } catch {
+      // Skip directories we can't read
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Check for Shai-Hulud git repository references
+ */
+export function checkShaiHuludRepos(directory: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+
+  // Check git config
+  const gitConfigPath = path.join(directory, '.git', 'config');
+  if (fs.existsSync(gitConfigPath)) {
+    try {
+      const content = fs.readFileSync(gitConfigPath, 'utf8');
+
+      for (const { pattern, description } of SHAI_HULUD_REPO_PATTERNS) {
+        if (pattern.test(content)) {
+          findings.push({
+            type: 'shai-hulud-repo',
+            severity: 'critical',
+            title: `Shai-Hulud repository reference in git config`,
+            description: `${description}. Your repository may have been configured to push to an attacker-controlled remote.`,
+            location: gitConfigPath,
+          });
+        }
+      }
+    } catch {
+      // Skip if we can't read
+    }
+  }
+
+  // Check package.json for repository references
+  const packageJsonFiles = findPackageJsonFiles(directory);
+  for (const file of packageJsonFiles) {
+    try {
+      const content = fs.readFileSync(file, 'utf8');
+
+      for (const { pattern, description } of SHAI_HULUD_REPO_PATTERNS) {
+        if (pattern.test(content)) {
+          findings.push({
+            type: 'shai-hulud-repo',
+            severity: 'high',
+            title: `Shai-Hulud reference in package.json`,
+            description: `${description}. Package may be configured to reference attacker infrastructure.`,
+            location: file,
+          });
+        }
+      }
+    } catch {
+      // Skip if we can't read
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Check for packages from affected namespaces (low-risk warning)
+ */
+export function checkAffectedNamespaces(filePath: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  const pkg = parsePackageJson(filePath);
+
+  if (!pkg) return findings;
+
+  const allDeps = {
+    ...pkg.dependencies,
+    ...pkg.devDependencies,
+    ...pkg.peerDependencies,
+    ...pkg.optionalDependencies,
+  };
+
+  for (const [name, version] of Object.entries(allDeps)) {
+    // Skip if already in affected packages list
+    if (isAffected(name)) continue;
+
+    // Check if from affected namespace
+    for (const namespace of AFFECTED_NAMESPACES) {
+      if (name.startsWith(namespace + '/')) {
+        // Check for semver range patterns that could auto-update to compromised versions
+        if (version && (version.startsWith('^') || version.startsWith('~'))) {
+          findings.push({
+            type: 'compromised-package',
+            severity: 'low',
+            title: `Package from affected namespace with semver range`,
+            description: `"${name}" is from the ${namespace} namespace which has known compromised packages. The version pattern "${version}" could auto-update to a compromised version during npm update.`,
+            location: filePath,
+            evidence: `"${name}": "${version}"`,
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Check for suspicious git branches
+ */
+export function checkSuspiciousBranches(directory: string): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  const headsPath = path.join(directory, '.git', 'refs', 'heads');
+
+  if (!fs.existsSync(headsPath)) return findings;
+
+  try {
+    const branches = fs.readdirSync(headsPath);
+
+    for (const branch of branches) {
+      for (const { pattern, description } of SHAI_HULUD_REPO_PATTERNS) {
+        if (pattern.test(branch)) {
+          findings.push({
+            type: 'shai-hulud-repo',
+            severity: 'medium',
+            title: `Suspicious git branch: ${branch}`,
+            description: `${description}. This branch name is associated with the Shai-Hulud attack campaign.`,
+            location: path.join(headsPath, branch),
+          });
+        }
+      }
+    }
+  } catch {
+    // Skip if we can't read
+  }
+
+  return findings;
+}
+
 export function runScan(
   directory: string,
   scanLockfiles: boolean = true
 ): ScanSummary {
   const startTime = Date.now();
   const allResults: ScanResult[] = [];
+  const allSecurityFindings: SecurityFinding[] = [];
   const scannedFiles: string[] = [];
   const seenPackages = new Set<string>();
+  const seenFindings = new Set<string>();
 
   // Scan package.json files
   const packageJsonFiles = findPackageJsonFiles(directory);
@@ -275,6 +752,26 @@ export function runScan(
       if (!seenPackages.has(key)) {
         seenPackages.add(key);
         allResults.push(result);
+      }
+    }
+
+    // Check for suspicious scripts in package.json
+    const scriptFindings = checkSuspiciousScripts(file);
+    for (const finding of scriptFindings) {
+      const key = `${finding.type}:${finding.location}:${finding.title}`;
+      if (!seenFindings.has(key)) {
+        seenFindings.add(key);
+        allSecurityFindings.push(finding);
+      }
+    }
+
+    // Check for packages from affected namespaces
+    const namespaceFindings = checkAffectedNamespaces(file);
+    for (const finding of namespaceFindings) {
+      const key = `${finding.type}:${finding.location}:${finding.title}`;
+      if (!seenFindings.has(key)) {
+        seenFindings.add(key);
+        allSecurityFindings.push(finding);
       }
     }
   }
@@ -303,9 +800,68 @@ export function runScan(
     }
   }
 
+  // ==========================================================================
+  // ADVANCED SECURITY CHECKS
+  // ==========================================================================
+
+  // Check for TruffleHog activity and credential scanning
+  const trufflehogFindings = checkTrufflehogActivity(directory);
+  for (const finding of trufflehogFindings) {
+    const key = `${finding.type}:${finding.location}:${finding.title}`;
+    if (!seenFindings.has(key)) {
+      seenFindings.add(key);
+      allSecurityFindings.push(finding);
+    }
+  }
+
+  // Check for secrets exfiltration files (actionsSecrets.json)
+  const exfilFindings = checkSecretsExfiltration(directory);
+  for (const finding of exfilFindings) {
+    const key = `${finding.type}:${finding.location}:${finding.title}`;
+    if (!seenFindings.has(key)) {
+      seenFindings.add(key);
+      allSecurityFindings.push(finding);
+    }
+  }
+
+  // Check GitHub Actions workflows for malicious runners
+  const runnerFindings = checkMaliciousRunners(directory);
+  for (const finding of runnerFindings) {
+    const key = `${finding.type}:${finding.location}:${finding.title}`;
+    if (!seenFindings.has(key)) {
+      seenFindings.add(key);
+      allSecurityFindings.push(finding);
+    }
+  }
+
+  // Check for Shai-Hulud repository references
+  const repoFindings = checkShaiHuludRepos(directory);
+  for (const finding of repoFindings) {
+    const key = `${finding.type}:${finding.location}:${finding.title}`;
+    if (!seenFindings.has(key)) {
+      seenFindings.add(key);
+      allSecurityFindings.push(finding);
+    }
+  }
+
+  // Check for suspicious git branches
+  const branchFindings = checkSuspiciousBranches(directory);
+  for (const finding of branchFindings) {
+    const key = `${finding.type}:${finding.location}:${finding.title}`;
+    if (!seenFindings.has(key)) {
+      seenFindings.add(key);
+      allSecurityFindings.push(finding);
+    }
+  }
+
   // Sort results by severity
   const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
   allResults.sort(
+    (a, b) => severityOrder[a.severity] - severityOrder[b.severity]
+  );
+
+  // Sort security findings by severity
+  allSecurityFindings.sort(
     (a, b) => severityOrder[a.severity] - severityOrder[b.severity]
   );
 
@@ -314,6 +870,7 @@ export function runScan(
     affectedCount: allResults.length,
     cleanCount: seenPackages.size - allResults.length,
     results: allResults,
+    securityFindings: allSecurityFindings,
     scannedFiles,
     scanTime: Date.now() - startTime,
   };
@@ -368,6 +925,75 @@ export function generateSarifReport(summary: ScanSummary): SarifResult {
     });
   }
 
+  // Add security findings to SARIF report
+  const findingTypeToRulePrefix: Record<string, string> = {
+    'suspicious-script': 'SCRIPT',
+    'trufflehog-activity': 'TRUFFLEHOG',
+    'shai-hulud-repo': 'REPO',
+    'secrets-exfiltration': 'EXFIL',
+    'malicious-runner': 'RUNNER',
+    'compromised-package': 'PKG',
+  };
+
+  for (const finding of summary.securityFindings) {
+    const prefix = findingTypeToRulePrefix[finding.type] || 'SEC';
+    const ruleKey = `${finding.type}:${finding.title}`;
+    let ruleId = ruleMap.get(ruleKey);
+
+    if (!ruleId) {
+      ruleId = `SHAI-${prefix}-${String(++ruleIndex).padStart(4, '0')}`;
+      ruleMap.set(ruleKey, ruleId);
+
+      rules.push({
+        id: ruleId,
+        name: finding.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 64),
+        shortDescription: {
+          text: finding.title,
+        },
+        fullDescription: {
+          text: finding.description,
+        },
+        helpUri:
+          'https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains',
+        defaultConfiguration: {
+          level:
+            finding.severity === 'critical'
+              ? 'error'
+              : finding.severity === 'high'
+              ? 'warning'
+              : 'note',
+        },
+      });
+    }
+
+    results.push({
+      ruleId,
+      level:
+        finding.severity === 'critical'
+          ? 'error'
+          : finding.severity === 'high'
+          ? 'warning'
+          : 'note',
+      message: {
+        text: `${finding.title}: ${finding.description}${finding.evidence ? `\n\nEvidence: ${finding.evidence}` : ''}`,
+      },
+      locations: [
+        {
+          physicalLocation: {
+            artifactLocation: {
+              uri: finding.location,
+            },
+            ...(finding.line && {
+              region: {
+                startLine: finding.line,
+              },
+            }),
+          },
+        },
+      ],
+    });
+  }
+
   return {
     $schema:
       'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
@@ -391,21 +1017,38 @@ export function generateSarifReport(summary: ScanSummary): SarifResult {
 
 export function formatTextReport(summary: ScanSummary): string {
   const lines: string[] = [];
+  const hasIssues = summary.affectedCount > 0 || summary.securityFindings.length > 0;
+  const criticalFindings = summary.securityFindings.filter(f => f.severity === 'critical');
+  const highFindings = summary.securityFindings.filter(f => f.severity === 'high');
+  const mediumFindings = summary.securityFindings.filter(f => f.severity === 'medium');
+  const lowFindings = summary.securityFindings.filter(f => f.severity === 'low');
 
   lines.push('');
-  lines.push('='.repeat(60));
+  lines.push('='.repeat(70));
   lines.push('  SHAI-HULUD 2.0 SUPPLY CHAIN ATTACK DETECTOR');
-  lines.push('='.repeat(60));
+  lines.push('='.repeat(70));
   lines.push('');
 
-  if (summary.affectedCount === 0) {
+  if (!hasIssues) {
     lines.push('  STATUS: CLEAN');
-    lines.push('  No compromised packages detected.');
+    lines.push('  No compromised packages or security issues detected.');
   } else {
-    lines.push(`  STATUS: AFFECTED (${summary.affectedCount} package(s) found)`);
+    const statusParts = [];
+    if (summary.affectedCount > 0) {
+      statusParts.push(`${summary.affectedCount} compromised package(s)`);
+    }
+    if (summary.securityFindings.length > 0) {
+      statusParts.push(`${summary.securityFindings.length} security finding(s)`);
+    }
+    lines.push(`  STATUS: AFFECTED - ${statusParts.join(', ')}`);
+  }
+
+  // Compromised packages section
+  if (summary.affectedCount > 0) {
     lines.push('');
-    lines.push('  AFFECTED PACKAGES:');
-    lines.push('-'.repeat(60));
+    lines.push('-'.repeat(70));
+    lines.push('  COMPROMISED PACKAGES:');
+    lines.push('-'.repeat(70));
 
     for (const result of summary.results) {
       const badge =
@@ -416,21 +1059,57 @@ export function formatTextReport(summary: ScanSummary): string {
     }
   }
 
+  // Security findings section
+  if (summary.securityFindings.length > 0) {
+    lines.push('');
+    lines.push('-'.repeat(70));
+    lines.push('  SECURITY FINDINGS:');
+    lines.push('-'.repeat(70));
+
+    // Group by severity
+    const printFindings = (findings: typeof summary.securityFindings, label: string) => {
+      if (findings.length === 0) return;
+      lines.push('');
+      lines.push(`  ${label} (${findings.length}):`);
+      for (const finding of findings) {
+        lines.push(`    [${finding.severity.toUpperCase()}] ${finding.title}`);
+        lines.push(`           Type: ${finding.type}`);
+        lines.push(`           Location: ${finding.location}`);
+        if (finding.evidence) {
+          const evidence = finding.evidence.length > 80
+            ? finding.evidence.substring(0, 77) + '...'
+            : finding.evidence;
+          lines.push(`           Evidence: ${evidence}`);
+        }
+        lines.push(`           ${finding.description}`);
+      }
+    };
+
+    printFindings(criticalFindings, 'CRITICAL');
+    printFindings(highFindings, 'HIGH');
+    printFindings(mediumFindings, 'MEDIUM');
+    printFindings(lowFindings, 'LOW');
+  }
+
   lines.push('');
-  lines.push('-'.repeat(60));
+  lines.push('-'.repeat(70));
   lines.push(`  Files scanned: ${summary.scannedFiles.length}`);
+  lines.push(`  Compromised packages: ${summary.affectedCount}`);
+  lines.push(`  Security findings: ${summary.securityFindings.length}`);
   lines.push(`  Scan time: ${summary.scanTime}ms`);
   lines.push(`  Database version: ${masterPackages.version}`);
   lines.push(`  Last updated: ${masterPackages.lastUpdated}`);
-  lines.push('='.repeat(60));
+  lines.push('='.repeat(70));
   lines.push('');
 
-  if (summary.affectedCount > 0) {
+  if (hasIssues) {
     lines.push('  IMMEDIATE ACTIONS REQUIRED:');
     lines.push('  1. Do NOT run npm install until packages are updated');
     lines.push('  2. Rotate all credentials (npm, GitHub, AWS, etc.)');
     lines.push('  3. Check for unauthorized GitHub self-hosted runners named "SHA1HULUD"');
     lines.push('  4. Audit GitHub repos for "Shai-Hulud: The Second Coming" description');
+    lines.push('  5. Check for actionsSecrets.json files containing stolen credentials');
+    lines.push('  6. Review package.json scripts for suspicious preinstall/postinstall hooks');
     lines.push('');
     lines.push('  For more information:');
     lines.push('  https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains');

@@ -38,11 +38,41 @@ export interface ScanResult {
   location: string;
 }
 
+// Types for advanced security checks
+export type SecurityFindingType =
+  | 'compromised-package'
+  | 'suspicious-script'
+  | 'trufflehog-activity'
+  | 'shai-hulud-repo'
+  | 'secrets-exfiltration'
+  | 'malicious-runner';
+
+export interface SecurityFinding {
+  type: SecurityFindingType;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  title: string;
+  description: string;
+  location: string;
+  line?: number;
+  evidence?: string;
+}
+
+export interface ScriptCheckResult {
+  hasSuspiciousScripts: boolean;
+  findings: SecurityFinding[];
+}
+
+export interface FileCheckResult {
+  found: boolean;
+  findings: SecurityFinding[];
+}
+
 export interface ScanSummary {
   totalDependencies: number;
   affectedCount: number;
   cleanCount: number;
   results: ScanResult[];
+  securityFindings: SecurityFinding[];
   scannedFiles: string[];
   scanTime: number;
 }
@@ -50,6 +80,7 @@ export interface ScanSummary {
 export interface PackageJson {
   name?: string;
   version?: string;
+  scripts?: Record<string, string>;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;

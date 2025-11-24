@@ -8,7 +8,23 @@ import {
   generateSarifReport,
   getMasterPackagesInfo,
 } from './scanner';
-import { ActionInputs } from './types';
+import { ActionInputs, ScanSummary } from './types';
+
+// =============================================================================
+// DISCLAIMER
+// =============================================================================
+// This tool is designed for DETECTION purposes only. It provides visibility
+// into potential supply chain compromises but does NOT:
+//
+//   - Automatically remove or quarantine malicious code
+//   - Patch, fix, or remediate compromised packages
+//   - Prevent future supply chain attacks
+//   - Guarantee detection of all compromised packages
+//
+// All findings should be manually verified by your security team. Take
+// appropriate remediation steps including credential rotation, dependency
+// updates, and forensic analysis of affected systems.
+// =============================================================================
 
 function getInputs(): ActionInputs {
   return {
@@ -73,10 +89,13 @@ async function run(): Promise<void> {
     }
 
     // Set outputs
+    const hasIssues = summary.affectedCount > 0 || summary.securityFindings.length > 0;
     core.setOutput('affected-count', summary.affectedCount.toString());
+    core.setOutput('security-findings-count', summary.securityFindings.length.toString());
     core.setOutput('scan-time', summary.scanTime.toString());
-    core.setOutput('status', summary.affectedCount > 0 ? 'affected' : 'clean');
+    core.setOutput('status', hasIssues ? 'affected' : 'clean');
     core.setOutput('results', JSON.stringify(summary.results));
+    core.setOutput('security-findings', JSON.stringify(summary.securityFindings));
 
     // Create annotations for affected packages
     if (summary.affectedCount > 0) {
@@ -99,8 +118,29 @@ async function run(): Promise<void> {
           );
         }
       }
+    }
 
-      // Create job summary
+    // Create annotations for security findings
+    if (summary.securityFindings.length > 0) {
+      for (const finding of summary.securityFindings) {
+        const annotation = {
+          title: finding.title,
+          file: finding.location,
+          startLine: finding.line || 1,
+        };
+
+        if (finding.severity === 'critical') {
+          core.error(`[CRITICAL] ${finding.title} - ${finding.type}`, annotation);
+        } else if (finding.severity === 'high') {
+          core.warning(`[HIGH] ${finding.title} - ${finding.type}`, annotation);
+        } else {
+          core.notice(`[${finding.severity.toUpperCase()}] ${finding.title} - ${finding.type}`, annotation);
+        }
+      }
+    }
+
+    // Create job summary if there are any issues
+    if (hasIssues) {
       await createJobSummary(summary);
     }
 
@@ -108,37 +148,50 @@ async function run(): Promise<void> {
     let shouldFail = false;
     let failReason = '';
 
-    if (inputs.failOnAny && summary.affectedCount > 0) {
+    // Count critical findings from security checks
+    const criticalSecurityFindings = summary.securityFindings.filter(
+      (f) => f.severity === 'critical'
+    ).length;
+    const highSecurityFindings = summary.securityFindings.filter(
+      (f) => f.severity === 'critical' || f.severity === 'high'
+    ).length;
+
+    if (inputs.failOnAny && hasIssues) {
+      const issues = [];
+      if (summary.affectedCount > 0) issues.push(`${summary.affectedCount} compromised package(s)`);
+      if (summary.securityFindings.length > 0) issues.push(`${summary.securityFindings.length} security finding(s)`);
       shouldFail = true;
-      failReason = `${summary.affectedCount} compromised package(s) detected`;
+      failReason = issues.join(' and ');
     } else if (inputs.failOnCritical) {
-      const criticalCount = summary.results.filter(
+      const criticalPackages = summary.results.filter(
         (r) => r.severity === 'critical'
       ).length;
-      if (criticalCount > 0) {
+      const totalCritical = criticalPackages + criticalSecurityFindings;
+      if (totalCritical > 0) {
         shouldFail = true;
-        failReason = `${criticalCount} critical severity package(s) detected`;
+        failReason = `${totalCritical} critical severity issue(s) detected`;
       }
     } else if (inputs.failOnHigh) {
-      const highOrAbove = summary.results.filter(
+      const highOrAbovePackages = summary.results.filter(
         (r) => r.severity === 'critical' || r.severity === 'high'
       ).length;
-      if (highOrAbove > 0) {
+      const totalHighOrAbove = highOrAbovePackages + highSecurityFindings;
+      if (totalHighOrAbove > 0) {
         shouldFail = true;
-        failReason = `${highOrAbove} high/critical severity package(s) detected`;
+        failReason = `${totalHighOrAbove} high/critical severity issue(s) detected`;
       }
     }
 
     if (shouldFail) {
       core.setFailed(
-        `Shai-Hulud 2.0 supply chain attack detected: ${failReason}`
+        `Shai-Hulud 2.0 supply chain attack indicators detected: ${failReason}`
       );
-    } else if (summary.affectedCount > 0) {
+    } else if (hasIssues) {
       core.warning(
-        `Shai-Hulud 2.0: ${summary.affectedCount} affected package(s) found (not failing due to configuration)`
+        `Shai-Hulud 2.0: Issues found (${summary.affectedCount} package(s), ${summary.securityFindings.length} finding(s)) but not failing due to configuration`
       );
     } else {
-      core.info('Scan complete. No compromised packages detected.');
+      core.info('Scan complete. No compromised packages or security issues detected.');
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -149,18 +202,27 @@ async function run(): Promise<void> {
   }
 }
 
-async function createJobSummary(summary: any): Promise<void> {
+async function createJobSummary(summary: ScanSummary): Promise<void> {
   const lines: string[] = [];
+  const hasIssues = summary.affectedCount > 0 || summary.securityFindings.length > 0;
 
   lines.push('# Shai-Hulud 2.0 Supply Chain Attack Scan Results');
   lines.push('');
   lines.push(
-    `> **Status:** ${summary.affectedCount > 0 ? 'AFFECTED' : 'CLEAN'}`
+    `> **Status:** ${hasIssues ? 'AFFECTED' : 'CLEAN'}`
   );
   lines.push('');
 
+  // Summary stats
+  lines.push('## Summary');
+  lines.push('');
+  lines.push(`- **Compromised Packages:** ${summary.affectedCount}`);
+  lines.push(`- **Security Findings:** ${summary.securityFindings.length}`);
+  lines.push(`- **Files Scanned:** ${summary.scannedFiles.length}`);
+  lines.push('');
+
   if (summary.affectedCount > 0) {
-    lines.push('## Affected Packages');
+    lines.push('## Compromised Packages');
     lines.push('');
     lines.push('| Package | Version | Severity | Type |');
     lines.push('|---------|---------|----------|------|');
@@ -171,35 +233,75 @@ async function createJobSummary(summary: any): Promise<void> {
         `| \`${result.package}\` | ${result.version} | ${result.severity.toUpperCase()} | ${type} |`
       );
     }
-
     lines.push('');
+  }
+
+  if (summary.securityFindings.length > 0) {
+    lines.push('## Security Findings');
+    lines.push('');
+    lines.push('| Finding | Type | Severity | Location |');
+    lines.push('|---------|------|----------|----------|');
+
+    for (const finding of summary.securityFindings) {
+      const shortLocation = finding.location.split('/').slice(-2).join('/');
+      lines.push(
+        `| ${finding.title} | \`${finding.type}\` | ${finding.severity.toUpperCase()} | \`${shortLocation}\` |`
+      );
+    }
+    lines.push('');
+
+    // Detail findings by type
+    const findingTypes = new Map<string, typeof summary.securityFindings>();
+    for (const finding of summary.securityFindings) {
+      if (!findingTypes.has(finding.type)) {
+        findingTypes.set(finding.type, []);
+      }
+      findingTypes.get(finding.type)!.push(finding);
+    }
+
+    lines.push('### Finding Details');
+    lines.push('');
+    for (const [type, findings] of findingTypes) {
+      lines.push(`<details>`);
+      lines.push(`<summary><strong>${type}</strong> (${findings.length} finding(s))</summary>`);
+      lines.push('');
+      for (const finding of findings) {
+        lines.push(`- **${finding.title}**`);
+        lines.push(`  - Location: \`${finding.location}\``);
+        lines.push(`  - ${finding.description}`);
+        if (finding.evidence) {
+          lines.push(`  - Evidence: \`${finding.evidence.substring(0, 100)}${finding.evidence.length > 100 ? '...' : ''}\``);
+        }
+      }
+      lines.push('');
+      lines.push('</details>');
+      lines.push('');
+    }
+  }
+
+  if (hasIssues) {
     lines.push('## Immediate Actions Required');
     lines.push('');
     lines.push('1. **Do NOT run `npm install`** until packages are updated');
     lines.push('2. **Rotate all credentials** (npm, GitHub, AWS, GCP, Azure)');
-    lines.push(
-      '3. **Check for unauthorized self-hosted runners** named "SHA1HULUD"'
-    );
-    lines.push(
-      '4. **Audit GitHub repos** for "Shai-Hulud: The Second Coming" description'
-    );
+    lines.push('3. **Check for unauthorized self-hosted runners** named "SHA1HULUD"');
+    lines.push('4. **Audit GitHub repos** for "Shai-Hulud: The Second Coming" description');
+    lines.push('5. **Search for `actionsSecrets.json`** files containing stolen credentials');
+    lines.push('6. **Review `package.json` scripts** for suspicious preinstall/postinstall hooks');
     lines.push('');
     lines.push('## More Information');
     lines.push('');
-    lines.push(
-      '- [Aikido Security Analysis](https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains)'
-    );
-    lines.push(
-      '- [Wiz.io Investigation](https://www.wiz.io/blog/shai-hulud-2-0-ongoing-supply-chain-attack)'
-    );
+    lines.push('- [Aikido Security Analysis](https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains)');
+    lines.push('- [Wiz.io Investigation](https://www.wiz.io/blog/shai-hulud-2-0-ongoing-supply-chain-attack)');
   } else {
-    lines.push(
-      'No compromised packages were detected in your dependencies.'
-    );
+    lines.push('No compromised packages or security issues were detected.');
   }
 
   lines.push('');
   lines.push('---');
+  lines.push('');
+  lines.push('> **Disclaimer:** This tool is for detection purposes only. It does not automatically remove malicious code, fix compromised packages, or prevent future attacks. Always verify findings manually and take appropriate remediation steps.');
+  lines.push('');
   lines.push(`*Scanned ${summary.scannedFiles.length} files in ${summary.scanTime}ms*`);
 
   await core.summary.addRaw(lines.join('\n')).write();
