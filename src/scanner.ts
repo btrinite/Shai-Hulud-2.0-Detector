@@ -1886,6 +1886,7 @@ export function formatTextReport(summary: ScanSummary): string {
 	lines.push('');
 	lines.push('-'.repeat(70));
 	lines.push(`  Files scanned: ${summary.scannedFiles.length}`);
+	lines.push(`  Total dependencies: ${summary.totalDependencies}`);
 	lines.push(`  Compromised packages: ${summary.affectedCount}`);
 	lines.push(`  Security findings: ${summary.securityFindings.length}`);
 	lines.push(`  Scan time: ${summary.scanTime}ms`);
