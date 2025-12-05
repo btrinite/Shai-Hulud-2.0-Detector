@@ -1264,6 +1264,7 @@ A huge thank you to all the community members who have contributed to this proje
 | <img src=https://github.com/albe.png width=32 height=32 alt=@albe> | [@albe](https://github.com/albe) | Code contributions, Pull requests |
 | <img src=https://github.com/alokemajumder.png width=32 height=32 alt=@alokemajumder> | [@alokemajumder](https://github.com/alokemajumder) | Code contributions, Issue reports, Pull requests |
 | <img src=https://github.com/buggedcom.png width=32 height=32 alt=@buggedcom> | [@buggedcom](https://github.com/buggedcom) | Discussions |
+| <img src=https://github.com/fhafner2.png width=32 height=32 alt=@fhafner2> | [@fhafner2](https://github.com/fhafner2) | Discussions |
 | <img src=https://github.com/gaellafond.png width=32 height=32 alt=@gaellafond> | [@gaellafond](https://github.com/gaellafond) | Issue reports |
 | <img src=https://github.com/Gaurav0.png width=32 height=32 alt=@Gaurav0> | [@Gaurav0](https://github.com/Gaurav0) | Issue reports |
 | <img src=https://github.com/jeis4wpi.png width=32 height=32 alt=@jeis4wpi> | [@jeis4wpi](https://github.com/jeis4wpi) | Issue reports |
