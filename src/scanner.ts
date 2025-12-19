@@ -612,16 +612,16 @@ export function scanPackageLock(filePath: string): ScanResult[] {
 	const directDeps = new Set<string>();
 	if (pkgJson) {
 		if (pkgJson.dependencies) {
-			Object.keys(pkgJson.dependencies).forEach((name) => directDeps.add(name));
+			Object.keys(pkgJson.dependencies || {}).forEach((name) => directDeps.add(name));
 		}
 		if (pkgJson.devDependencies) {
-			Object.keys(pkgJson.devDependencies).forEach((name) => directDeps.add(name));
+			Object.keys(pkgJson.devDependencies || {}).forEach((name) => directDeps.add(name));
 		}
 		if (pkgJson.peerDependencies) {
-			Object.keys(pkgJson.peerDependencies).forEach((name) => directDeps.add(name));
+			Object.keys(pkgJson.peerDependencies || {}).forEach((name) => directDeps.add(name));
 		}
 		if (pkgJson.optionalDependencies) {
-			Object.keys(pkgJson.optionalDependencies).forEach((name) => directDeps.add(name));
+			Object.keys(pkgJson.optionalDependencies || {}).forEach((name) => directDeps.add(name));
 		}
 	}
 
@@ -707,18 +707,23 @@ export function scanBunLock(filePath: string): ScanResult[] {
 	const results: ScanResult[] = [];
 	const bunLock = parseBunLock(filePath);
 
-	// For each dep, if root and in directDeps, isDirect true
-
 	if (!bunLock) return results;
 
-	const directDependenciesNamesArray: string[] = []
-
-	Object.values(bunLock.workspaces).forEach(({ dependencies, devDependencies }) => {
-		directDependenciesNamesArray.splice(-1, 0, ...Object.keys(dependencies))
-		directDependenciesNamesArray.splice(-1, 0, ...Object.keys(devDependencies))
-	})
-
-	const directDependenciesNames = new Set(directDependenciesNamesArray)
+	const directDependenciesNames = new Set<string>();
+	
+    if (bunLock.workspaces && typeof bunLock.workspaces === "object") {
+		for (const wsKey of Object.keys(bunLock.workspaces)) {
+			const ws = bunLock.workspaces[wsKey];
+			if (ws && typeof ws === "object") {
+				Object.keys(ws.dependencies || {}).forEach((name) =>
+					directDependenciesNames.add(name)
+				);
+				Object.keys(ws.devDependencies || {}).forEach((name) =>
+					directDependenciesNames.add(name)
+				);
+			}
+		}
+	}
 
 	for (const [scopedName, entry] of Object.entries(bunLock.packages)) {
 		const splittedNameVersion = entry[0].split('@')
@@ -1583,7 +1588,8 @@ export function runScan(
 	// Scan package.json files
 	const packageJsonFiles = findPackageJsonFiles(directory, scanNodeModules);
 	for (const file of packageJsonFiles) {
-		scannedFiles.push(file);
+		const normalizedFile = file.replace(/\\/g, "/");
+		scannedFiles.push(normalizedFile);
 		const results = scanPackageJson(file, true);
 		for (const result of results) {
 			const key = `${result.package}@${result.version}`;
@@ -1620,7 +1626,8 @@ export function runScan(
 	if (scanLockfiles) {
 		const lockfiles = findLockfiles(directory, scanNodeModules);
 		for (const file of lockfiles) {
-			scannedFiles.push(file);
+		    const normalizedFile = file.replace(/\\/g, "/");
+			scannedFiles.push(normalizedFile);
 
 			let results: ScanResult[] = [];
 			if (
