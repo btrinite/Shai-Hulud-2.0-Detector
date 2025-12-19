@@ -1358,6 +1358,7 @@ A huge thank you to all the community members who have contributed to this proje
 | <img src=https://github.com/fhafner2.png width=32 height=32 alt=@fhafner2> | [@fhafner2](https://github.com/fhafner2) | Discussions |
 | <img src=https://github.com/gaellafond.png width=32 height=32 alt=@gaellafond> | [@gaellafond](https://github.com/gaellafond) | Issue reports |
 | <img src=https://github.com/Gaurav0.png width=32 height=32 alt=@Gaurav0> | [@Gaurav0](https://github.com/Gaurav0) | Issue reports |
+| <img src=https://github.com/giulietta-dev.png width=32 height=32 alt=@giulietta-dev> | [@giulietta-dev](https://github.com/giulietta-dev) | Code contributions |
 | <img src=https://github.com/jeis4wpi.png width=32 height=32 alt=@jeis4wpi> | [@jeis4wpi](https://github.com/jeis4wpi) | Issue reports |
 | <img src=https://github.com/julia-infocaster.png width=32 height=32 alt=@julia-infocaster> | [@julia-infocaster](https://github.com/julia-infocaster) | Code contributions, Pull requests |
 | <img src=https://github.com/julien1619.png width=32 height=32 alt=@julien1619> | [@julien1619](https://github.com/julien1619) | Code contributions, Pull requests |
